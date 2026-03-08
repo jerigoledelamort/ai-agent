@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent import run
+from src.runner import run
 
 
 if __name__ == "__main__":
