@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass, asdict
-from pathlib import Path
 import builtins
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
 
 @dataclass
@@ -13,21 +13,19 @@ class ValidationIssue:
     message: str
 
 
-class _ModuleNameValidator(ast.NodeVisitor):
-    """Lightweight static checker for undefined top-level names."""
+class _TopLevelNameValidator(ast.NodeVisitor):
+    """Conservative static checker for undefined names at module scope only."""
 
     def __init__(self) -> None:
         self.defined: set[str] = set()
         self.used: list[tuple[str, int]] = []
 
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        self.defined.add(node.name)
-
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        self.defined.add(node.name)
-
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        self.defined.add(node.name)
+    def visit_Module(self, node: ast.Module) -> None:
+        for item in node.body:
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                self.defined.add(item.name)
+                continue
+            self.visit(item)
 
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
@@ -43,10 +41,18 @@ class _ModuleNameValidator(ast.NodeVisitor):
         for target in node.targets:
             if isinstance(target, ast.Name):
                 self.defined.add(target.id)
+        self.visit(node.value)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         if isinstance(node.target, ast.Name):
             self.defined.add(node.target.id)
+        if node.value is not None:
+            self.visit(node.value)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        if isinstance(node.target, ast.Name):
+            self.defined.add(node.target.id)
+        self.visit(node.value)
 
     def visit_Name(self, node: ast.Name) -> None:
         if isinstance(node.ctx, ast.Load):
@@ -54,7 +60,7 @@ class _ModuleNameValidator(ast.NodeVisitor):
 
 
 def _check_missing_names(tree: ast.AST, file_path: Path) -> list[ValidationIssue]:
-    visitor = _ModuleNameValidator()
+    visitor = _TopLevelNameValidator()
     visitor.visit(tree)
 
     known = set(dir(builtins)) | visitor.defined
@@ -70,7 +76,6 @@ def _check_missing_names(tree: ast.AST, file_path: Path) -> list[ValidationIssue
             )
         )
     return issues
-
 
 
 def _check_local_imports(tree: ast.AST, file_path: Path, available_modules: set[str]) -> list[ValidationIssue]:
@@ -99,6 +104,7 @@ def _check_local_imports(tree: ast.AST, file_path: Path, available_modules: set[
                             )
                         )
     return issues
+
 
 def validate_source_directory(src_dir: Path) -> list[dict[str, str]]:
     issues: list[ValidationIssue] = []
