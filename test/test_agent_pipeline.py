@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
 
 def _run_agent(workdir: Path, repo_root: Path) -> subprocess.CompletedProcess[str]:
+    cmd = (
+        "from pathlib import Path; "
+        "from src.runner import run; "
+        f"raise SystemExit(run(Path(r'{workdir}')))"
+    )
     return subprocess.run(
-        ["python", str(repo_root / "agent.py")],
-        cwd=workdir,
+        ["python", "-c", cmd],
+        cwd=repo_root,
         capture_output=True,
         text=True,
         check=False,
@@ -26,8 +32,15 @@ def test_agent_generates_project_structure(tmp_path: Path) -> None:
     result = _run_agent(version_dir, repo_root)
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert (version_dir / "src" / "project_app.py").exists()
-    assert (version_dir / "tests" / "test_project_app.py").exists()
+
+    structure = json.loads((version_dir / "memory" / "file_structure.json").read_text(encoding="utf-8"))
+    src_modules = structure.get("src", [])
+    assert src_modules
+
+    for module in src_modules:
+        assert (version_dir / "src" / module).exists()
+        assert (version_dir / "tests" / f"test_{Path(module).stem}.py").exists()
+
     assert (version_dir / "memory" / "plan.json").exists()
     assert (version_dir / "tests" / "test_results.md").exists()
     assert (version_dir / "memory" / "project_state.md").exists()

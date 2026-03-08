@@ -22,6 +22,9 @@ def extract_requirements(task_text: str, guard: SandboxGuard | None = None) -> l
         f"{task_text}\n\n"
         "Current project state:\n"
         f"{project_state}\n\n"
+        "Rules:\n"
+        "- Use only information from the specification and project state.\n"
+        "- Do not inject assumptions from template/example projects.\n\n"
         "Return Python list of requirements."
     )
     response = generate(prompt)
@@ -29,4 +32,6 @@ def extract_requirements(task_text: str, guard: SandboxGuard | None = None) -> l
     if parsed:
         return parsed
     lines = [line.strip("- ") for line in response.splitlines() if line.strip()]
-    return lines if lines else ["Реализовать требования из memory/task.md."]
+    if lines:
+        return lines
+    return ["Implement the requirements described in memory/task.md."]
