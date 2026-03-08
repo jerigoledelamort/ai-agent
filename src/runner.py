@@ -16,8 +16,8 @@ from .tester import Tester
 from .version_detector import detect_version
 
 
-MAX_FIX_ATTEMPTS = 5
-MAX_PRETEST_FIX_ATTEMPTS = 3
+MAX_FIX_ATTEMPTS = 12
+MAX_PRETEST_FIX_ATTEMPTS = 4
 
 
 def run(workdir: Path) -> int:
@@ -104,12 +104,14 @@ def run(workdir: Path) -> int:
     fixer = Fixer(version.current_dir, guard)
 
     tests_passed = False
-
+    no_progress = 0
     for attempt in range(1, MAX_FIX_ATTEMPTS + 1):
 
         memory.append_devlog(f"Validation attempt {attempt}")
 
         result = tester.run()
+        error_analysis = fixer.analyze_failure(result.output)
+        memory.append_devlog("Error analysis:\n" + error_analysis)
 
         guard.resolve("tests/test_results.md").write_text(
             f"# Validation attempt {attempt}\n\n```\n{result.output}\n```\n",
@@ -120,8 +122,22 @@ def run(workdir: Path) -> int:
             tests_passed = True
             break
 
-        fix_note = fixer.apply(result.output)
+        error_analysis = fixer.analyze_failure(result.output)
+        memory.append_devlog("Error analysis:\n" + error_analysis)
+        
+        fix_note = fixer.apply(result.output + "\n\nAnalysis:\n" + error_analysis)
         memory.append_devlog(f"Fix attempt {attempt}: {fix_note}")
+
+        if "No automatic fix applied" in fix_note:
+            no_progress += 1
+        else:
+            no_progress = 0
+
+        if no_progress >= 2:
+            memory.append_devlog(
+                "Stopping early: fixer made no progress for two consecutive attempts."
+            )
+            break
 
     if not tests_passed:
 

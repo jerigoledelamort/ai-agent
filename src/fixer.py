@@ -79,13 +79,40 @@ class Fixer:
             f"{error_summary}\n\n"
             "Current project state:\n"
             f"{project_state}\n\n"
-            "Fix the code based on the failure classification.\n\n"
+            "Project source code:\n"
+            + "\n".join(
+                f"# file: {p.relative_to(self.workdir)}\n{p.read_text(encoding='utf-8')}\n"
+                for p in self.workdir.rglob("src/*.py")
+            )
+            + "\n\n"
+            "First analyze the failure.\n"
+            "Explain why the tests failed and which part of the implementation is incorrect.\n"
+            "Identify the exact bug in the code.\n\n"
+
+            "Then propose how to fix the implementation.\n"
+            "Only after the analysis output the corrected code patches.\n\n"
+
+            "Code patches MUST be returned as Python code blocks with file hints.\n"
+            "Example:\n"
+            "```python file: src/module.py\n"
+            "# corrected code\n"
+            "```\n\n"
             "IMPORTANT RULES:\n"
             "- You may modify files inside src/ and tests/.\n"
             "- Do NOT create unrelated files.\n"
             "- Keep the project generic and aligned to existing API.\n\n"
             "Return corrected code patches with explicit file hints."
         )
+
+        if "ModuleNotFoundError" in output:
+            tests_dir = self.guard.resolve("tests")
+            if tests_dir.exists():
+                for file in tests_dir.glob("*.py"):
+                    text = file.read_text(encoding="utf-8")
+                    text = text.replace("from task import", "from src.task import")
+                    text = text.replace("from task_manager import", "from src.task_manager import")
+                    text = text.replace("from task_storage import", "from src.task_storage import")
+                    file.write_text(text, encoding="utf-8")
 
         response = generate(prompt)
         matches = list(_CODE_BLOCK.finditer(response))
@@ -112,3 +139,16 @@ class Fixer:
             applied += 1
 
         return f"Applied {applied} LLM patch(es)." if applied else "No automatic fix applied."
+
+    def analyze_failure(self, output: str) -> str:
+        prompt = (
+            "Analyze the following pytest failure.\n\n"
+            "Explain:\n"
+            "1. Which test failed\n"
+            "2. Which module/function caused the failure\n"
+            "3. The likely bug in the implementation\n"
+            "4. What needs to be changed to fix it\n\n"
+            "Do NOT output code. Only analysis.\n\n"
+            f"{output}"
+        )
+        return generate(prompt)

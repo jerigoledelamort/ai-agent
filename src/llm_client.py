@@ -111,10 +111,15 @@ def generate(prompt: str) -> str:
             check=False,
         )
     except FileNotFoundError:
-        return _fallback(prompt)
+        raise RuntimeError("Ollama not found. Make sure Ollama is installed and available in PATH.")
     if result.returncode == 0 and result.stdout.strip():
         return result.stdout.strip()
-    return _fallback(prompt)
+    raise RuntimeError(
+        f"LLM generation failed.\n"
+        f"Return code: {result.returncode}\n"
+        f"stdout: {result.stdout}\n"
+        f"stderr: {result.stderr}"
+    )
 
 
 def parse_python_list(text: str) -> list[str]:

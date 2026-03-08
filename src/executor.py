@@ -183,6 +183,21 @@ class Executor:
                 f"{self._source_snippets()}\n\n"
                 f"{self._module_list()}\n\n"
                 f"Implement functionality for this module: src/{module}\n\n"
+                "Before writing the code, first write a short 'Implementation plan'.\n"
+                "The plan should explain:\n"
+                "- which functions or classes will be implemented\n"
+                "- what data structures will be used\n"
+                "- which edge cases must be handled\n"
+                "- which modules will be imported\n\n"
+                
+                "After the plan, output the final implementation as a Python code block.\n"
+                "Use the format:\n"
+                "Implementation plan:\n"
+                "...\n\n"
+                "```python file: src/{module}\n"
+                "# code here\n"
+                "```\n\n"
+
                 "Rules:\n"
                 "- Only modify this module.\n"
                 "- Do not break existing functions.\n"
@@ -224,9 +239,10 @@ class Executor:
             if p.name != "__init__.py"
         ]
         corrected = []
+
         for file_path in src_dir.glob("*.py"):
             if file_path.name == "__init__.py":
-                continue
+                continue            
             content = file_path.read_text(encoding="utf-8")
             original = content
             for module in _IMPORT_FROM_PATTERN.findall(content):
@@ -249,6 +265,21 @@ class Executor:
                         f"import src.{module}",
                         f"import src.{replacement}"
                     )
+            if content != original:
+                file_path.write_text(content, encoding="utf-8")
+                corrected.append(file_path)
+        
+                # normalize local imports inside src package
+        for file_path in src_dir.glob("*.py"):
+            if file_path.name == "__init__.py":
+                continue
+            content = file_path.read_text(encoding="utf-8")
+            original = content
+            for module in available:
+                content = content.replace(
+                    f"from {module} import",
+                    f"from .{module} import"
+                )
             if content != original:
                 file_path.write_text(content, encoding="utf-8")
                 corrected.append(file_path)
@@ -333,11 +364,16 @@ class Executor:
                     self._existing_tests(),
                     f"Generate pytest tests for module src/{module} based only on the real API.",
                     "Rules:\n"
+                    "Rules:\n"
                     "- Output test code for exactly one file.\n"
                     f"- The test file must be tests/{test_name}.\n"
+                    "- All project modules are located inside the 'src' package.\n"
+                    "- Tests MUST import project code using 'from src.module import ...'.\n"
+                    "- Never use 'from module import ...'.\n"
+                    "- Example: from src.task import Task\n"
                     f"- Tests must only reference src/{module}.\n"
                     "- Do not reference non-existent modules.\n"
-                    "- Test only functions/classes/methods that exist in the extracted API.",
+                    "- Test only functions/classes/methods that exist in the extracted API.\n"
                 ]
             )
 
