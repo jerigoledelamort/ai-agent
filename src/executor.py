@@ -9,6 +9,8 @@ from .llm_client import generate
 from .memory_manager import MemoryManager
 from .project_state import summarize_project
 from .sandbox_guard import SandboxGuard
+from .source_validator import validate_source_directory
+from .api_extractor import extract_api_from_source
 
 
 _CODE_BLOCK = re.compile(r"```python(?:\s+file:(?P<file>[^\n]+))?\n(?P<code>.*?)```", re.DOTALL)
@@ -56,6 +58,7 @@ class Executor:
             "architecture": self._read("memory/architecture.md"),
             "file_structure": self._read("memory/file_structure.json"),
             "project_state": self._read("memory/project_state.md"),
+            "api_description": self._read("memory/api_description.json"),
         }
 
     def _extract_modules_from_architecture(self) -> list[str]:
@@ -251,6 +254,20 @@ class Executor:
                 corrected.append(file_path)
         return corrected
 
+    def validate_source_code(self) -> list[dict[str, str]]:
+        src_dir = self.guard.resolve("src")
+        issues = validate_source_directory(src_dir)
+        self.memory.write_json("source_validation_report.json", issues)
+        self.memory.append_devlog(f"Source validation completed with {len(issues)} issue(s)")
+        return issues
+
+    def extract_api(self) -> dict:
+        src_dir = self.guard.resolve("src")
+        api_description = extract_api_from_source(src_dir)
+        self.memory.write_json("api_description.json", api_description)
+        self.memory.append_devlog("API extraction phase completed")
+        return api_description
+
     def _existing_tests(self) -> str:
         tests_dir = self.guard.resolve("tests")
         snippets = []
@@ -290,16 +307,21 @@ class Executor:
                 f"{context['task']}\n\n"
                 "Architecture:\n"
                 f"{context['architecture']}\n\n"
+                "Project file structure:\n"
+                f"{context['file_structure']}\n\n"
+                "Extracted API description:\n"
+                f"{context['api_description']}\n\n"
                 "Project source code:\n"
                 f"{self._source_snippets()}\n\n"
                 "Existing tests:\n"
                 f"{self._existing_tests()}\n\n"
-                f"Generate pytest tests for module src/{module}.\n\n"
+                f"Generate pytest tests for module src/{module} based only on the real API.\n\n"
                 "Rules:\n"
                 "- Output test code for exactly one file.\n"
                 f"- The test file must be tests/{test_name}.\n"
                 f"- Tests must only reference src/{module}.\n"
                 "- Do not reference non-existent modules.\n"
+                "- Test only functions/classes/methods that exist in the extracted API.\n"
             )
 
             response = generate(prompt)
