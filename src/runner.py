@@ -17,6 +17,7 @@ from .version_detector import detect_version
 
 
 MAX_FIX_ATTEMPTS = 5
+MAX_PRETEST_FIX_ATTEMPTS = 3
 
 
 def run(workdir: Path) -> int:
@@ -61,18 +62,32 @@ def run(workdir: Path) -> int:
     generated.extend(executor.validate_dependencies())
 
     # source validation before tests
+    pretest_fixer = Fixer(version.current_dir, guard)
     source_issues = executor.validate_source_code()
 
-    # fix source validation issues before tests
-    if source_issues:
-        source_report = "\n".join(
+    # fix source validation issues before tests and re-validate
+    pretest_attempt = 0
+    while source_issues and pretest_attempt < MAX_PRETEST_FIX_ATTEMPTS:
+        pretest_attempt += 1
+        source_report = "\n\n".join(
             f"file: {issue['file']}\nerror_type: {issue['error_type']}\nmessage: {issue['message']}"
             for issue in source_issues
         )
-        memory.append_devlog("Source validation found issues; invoking fixer before test generation.")
-        pretest_fixer = Fixer(version.current_dir, guard)
+        memory.append_devlog(
+            "Source validation found issues; invoking fixer before test generation "
+            f"(attempt {pretest_attempt})."
+        )
         fix_note = pretest_fixer.apply(source_report, context="source_validation")
-        memory.append_devlog(f"Pre-test fix: {fix_note}")
+        memory.append_devlog(f"Pre-test fix {pretest_attempt}: {fix_note}")
+        source_issues = executor.validate_source_code()
+
+    if source_issues:
+        memory.write_text(
+            "blocked.md",
+            "# Blocked\n\nSource validation failed before test generation.\n",
+        )
+        memory.append_devlog("Stopped due to unresolved source validation issues.")
+        return 1
 
     # extract API for test generation
     executor.extract_api()

@@ -298,30 +298,47 @@ class Executor:
 
         generated: list[Path] = []
 
-        for module in structure["src"]:
+        api_modules: set[str] = set()
+        if context["api_description"]:
+            try:
+                parsed_api = json.loads(context["api_description"])
+                modules = parsed_api.get("modules", {})
+                if isinstance(modules, dict):
+                    api_modules = {f"{name}.py" for name in modules.keys()}
+            except json.JSONDecodeError:
+                api_modules = set()
+
+        if api_modules:
+            target_modules = [module for module in structure["src"] if module in api_modules]
+        else:
+            target_modules = structure["src"]
+
+        for module in target_modules:
             stem = Path(module).stem
             test_name = f"test_{stem}.py"
 
-            prompt = (
-                "Project specification:\n"
-                f"{context['task']}\n\n"
-                "Architecture:\n"
-                f"{context['architecture']}\n\n"
-                "Project file structure:\n"
-                f"{context['file_structure']}\n\n"
-                "Extracted API description:\n"
-                f"{context['api_description']}\n\n"
-                "Project source code:\n"
-                f"{self._source_snippets()}\n\n"
-                "Existing tests:\n"
-                f"{self._existing_tests()}\n\n"
-                f"Generate pytest tests for module src/{module} based only on the real API.\n\n"
-                "Rules:\n"
-                "- Output test code for exactly one file.\n"
-                f"- The test file must be tests/{test_name}.\n"
-                f"- Tests must only reference src/{module}.\n"
-                "- Do not reference non-existent modules.\n"
-                "- Test only functions/classes/methods that exist in the extracted API.\n"
+            prompt = "\n\n".join(
+                [
+                    "Project specification:",
+                    context["task"],
+                    "Architecture:",
+                    context["architecture"],
+                    "Project file structure:",
+                    context["file_structure"],
+                    "Extracted API description:",
+                    context["api_description"],
+                    "Project source code:",
+                    self._source_snippets(),
+                    "Existing tests:",
+                    self._existing_tests(),
+                    f"Generate pytest tests for module src/{module} based only on the real API.",
+                    "Rules:\n"
+                    "- Output test code for exactly one file.\n"
+                    f"- The test file must be tests/{test_name}.\n"
+                    f"- Tests must only reference src/{module}.\n"
+                    "- Do not reference non-existent modules.\n"
+                    "- Test only functions/classes/methods that exist in the extracted API.",
+                ]
             )
 
             response = generate(prompt)
@@ -349,6 +366,8 @@ class Executor:
             generated.append(test_file)
 
         self._update_state()
-        self.memory.append_devlog("Test generation phase completed")
+        self.memory.append_devlog(
+            f"Test generation phase completed for {len(target_modules)} module(s)"
+        )
 
         return generated

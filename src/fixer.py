@@ -17,6 +17,9 @@ _ERROR_LINE = re.compile(
     re.MULTILINE,
 )
 
+_TEST_PATH_PATTERN = re.compile(r"\btests?/[^\s:]+\.py\b")
+_SRC_PATH_PATTERN = re.compile(r"\bsrc/[^\s:]+\.py\b")
+
 
 class Fixer:
 
@@ -32,16 +35,33 @@ class Fixer:
                 lines.append(line)
         return "\n".join(lines) if lines else output[:2000]
 
-    def _classify_failure(self, output: str) -> str:
+    def _classify_failure(self, output: str, context: str) -> str:
         lowered = output.lower()
-        if "tests/" in lowered and "syntaxerror" in lowered:
+
+        if context == "source_validation":
+            if "syntaxerror" in lowered:
+                return "invalid_source_syntax"
+            if "importerror" in lowered or "nameerror" in lowered:
+                return "invalid_source_dependencies_or_names"
+            return "invalid_source_code"
+
+        test_paths = set(_TEST_PATH_PATTERN.findall(output))
+        src_paths = set(_SRC_PATH_PATTERN.findall(output))
+
+        if "collected 0 items" in lowered and test_paths:
             return "invalid_test_code"
-        if "assertionerror" in lowered:
-            return "incorrect_implementation_or_expectation"
-        if "src/" in lowered and any(k in lowered for k in ["nameerror", "typeerror", "attributeerror"]):
+        if "syntaxerror" in lowered and test_paths and not src_paths:
+            return "invalid_test_code"
+        if "modulenotfounderror" in lowered and test_paths and not src_paths:
+            return "invalid_test_code"
+        if "assertionerror" in lowered and test_paths and not src_paths:
+            return "invalid_test_code"
+        if src_paths and any(err in lowered for err in ["nameerror", "typeerror", "attributeerror", "importerror"]):
             return "incorrect_implementation_code"
-        if "module not found" in lowered or "modulenotfounderror" in lowered:
-            return "invalid_test_code_or_imports"
+        if src_paths and "assertionerror" in lowered:
+            return "incorrect_implementation_code"
+        if test_paths and src_paths:
+            return "mixed_test_and_implementation_failures"
         return "unknown"
 
     def apply(self, output: str, context: str = "pytest") -> str:
@@ -50,7 +70,7 @@ class Fixer:
         project_state = state_path.read_text(encoding="utf-8") if state_path.exists() else ""
 
         error_summary = self._extract_errors(output)
-        failure_type = self._classify_failure(output)
+        failure_type = self._classify_failure(output, context)
 
         prompt = (
             f"The project failed during {context}.\n\n"
