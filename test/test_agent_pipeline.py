@@ -42,6 +42,8 @@ def test_agent_generates_project_structure(tmp_path: Path) -> None:
         assert (version_dir / "tests" / f"test_{Path(module).stem}.py").exists()
 
     assert (version_dir / "memory" / "plan.json").exists()
+    assert (version_dir / "memory" / "source_validation_report.json").exists()
+    assert (version_dir / "memory" / "api_description.json").exists()
     assert (version_dir / "tests" / "test_results.md").exists()
     assert (version_dir / "memory" / "project_state.md").exists()
 

@@ -60,6 +60,23 @@ def run(workdir: Path) -> int:
     # dependency validation
     generated.extend(executor.validate_dependencies())
 
+    # source validation before tests
+    source_issues = executor.validate_source_code()
+
+    # fix source validation issues before tests
+    if source_issues:
+        source_report = "\n".join(
+            f"file: {issue['file']}\nerror_type: {issue['error_type']}\nmessage: {issue['message']}"
+            for issue in source_issues
+        )
+        memory.append_devlog("Source validation found issues; invoking fixer before test generation.")
+        pretest_fixer = Fixer(version.current_dir, guard)
+        fix_note = pretest_fixer.apply(source_report, context="source_validation")
+        memory.append_devlog(f"Pre-test fix: {fix_note}")
+
+    # extract API for test generation
+    executor.extract_api()
+
     # generate tests ONCE
     generated.extend(executor.generate_tests_from_structure())
 
