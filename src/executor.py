@@ -408,6 +408,74 @@ class Executor:
 
         return generated
 
+
+    def apply_refactor(self, plan: dict) -> list[Path]:
+        actions = plan.get("actions", []) if isinstance(plan, dict) else []
+        applied: list[Path] = []
+
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            action_type = str(action.get("type", "")).strip()
+            target = str(action.get("target", "")).strip()
+            description = str(action.get("description", "")).strip()
+            if not target:
+                continue
+
+            if action_type == "remove_unused_import":
+                path = self.guard.resolve(target)
+                if path.exists():
+                    original = path.read_text(encoding="utf-8")
+                    updated = self._remove_unused_imports_with_llm(target, original, description)
+                    if updated and updated != original:
+                        path.write_text(updated, encoding="utf-8")
+                        applied.append(path)
+                continue
+
+            if action_type in {"modify_file", "update_function", "add_module"}:
+                path = self.guard.resolve(target)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                original = path.read_text(encoding="utf-8") if path.exists() else ""
+                updated = self._rewrite_file_with_llm(target, original, description, action_type)
+                if updated and updated != original:
+                    path.write_text(updated, encoding="utf-8")
+                    applied.append(path)
+
+        if applied:
+            self._update_state()
+        return applied
+
+    def _rewrite_file_with_llm(self, target: str, current_code: str, description: str, action_type: str) -> str:
+        prompt = (
+            f"Apply refactor action '{action_type}' for file {target}.\n"
+            f"Description: {description}\n\n"
+            "Current code:\n"
+            f"```python file:{target}\n{current_code}\n```\n\n"
+            "Return only one Python code block with file hint for the same target file."
+        )
+        response = generate(prompt)
+        for file_hint, code in self._extract_blocks(response):
+            if file_hint and file_hint.strip() == target:
+                return code
+        blocks = self._extract_blocks(response)
+        if blocks:
+            return blocks[0][1]
+        return current_code
+
+    def _remove_unused_imports_with_llm(self, target: str, current_code: str, description: str) -> str:
+        prompt = (
+            f"Remove only unused imports in {target}.\n"
+            f"Additional note: {description}\n\n"
+            "Current code:\n"
+            f"```python file:{target}\n{current_code}\n```\n\n"
+            "Do not change behavior. Return one Python code block with the same file hint."
+        )
+        response = generate(prompt)
+        for file_hint, code in self._extract_blocks(response):
+            if file_hint and file_hint.strip() == target:
+                return code
+        return current_code
+
     def detect_runtime_artifacts(self) -> list[str]:
         import re
         from pathlib import Path

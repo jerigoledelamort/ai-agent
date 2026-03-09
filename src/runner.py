@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
+from .architecture_reviewer import generate_architecture_review
 from .architect import build_architecture
 from .context_loader import load_context
 from .dependency_manager import DependencyManager
@@ -10,7 +11,9 @@ from .executor import Executor
 from .fixer import Fixer
 from .memory_manager import MemoryManager
 from .planner import create_plan
+from .project_analyzer import analyze_project
 from .project_state import summarize_project
+from .refactor_planner import generate_refactor_plan
 from .requirements_extractor import extract_requirements
 from .sandbox_guard import SandboxGuard
 from .structure_planner import plan_file_structure
@@ -23,6 +26,23 @@ MAX_PRETEST_FIX_ATTEMPTS = 4
 _MISSING_MODULE_PATTERN = re.compile(r"No module named ['\"]([a-zA-Z_][\w\.]*)['\"]")
 
 
+_BUILD_KEYWORDS = {
+    "build", "create", "generate", "from scratch", "new project", "scaffold", "implement a project",
+}
+_EVOLVE_KEYWORDS = {
+    "evolve", "improve", "refactor", "analyze existing", "existing project", "codebase", "optimize", "modernize",
+}
+
+
+def detect_task_mode(task_text: str) -> str:
+    normalized = (task_text or "").lower()
+    evolve_hits = sum(1 for key in _EVOLVE_KEYWORDS if key in normalized)
+    build_hits = sum(1 for key in _BUILD_KEYWORDS if key in normalized)
+    if evolve_hits > build_hits:
+        return "evolve"
+    return "build"
+
+
 def _extract_missing_module(error_output: str) -> str | None:
     match = _MISSING_MODULE_PATTERN.search(error_output)
     if not match:
@@ -30,17 +50,69 @@ def _extract_missing_module(error_output: str) -> str | None:
     return match.group(1).split(".", 1)[0]
 
 
-def run(workdir: Path) -> int:
+def _run_test_fix_loop(
+    tester: Tester,
+    fixer: Fixer,
+    executor: Executor,
+    dependency_manager: DependencyManager,
+    memory: MemoryManager,
+) -> bool:
+    tests_passed = False
+    no_progress = 0
+    created_runtime_files = set()
+    for attempt in range(1, MAX_FIX_ATTEMPTS + 1):
+        memory.append_devlog(f"Validation attempt {attempt}")
 
-    version = detect_version(workdir)
-    guard = SandboxGuard(version.current_dir)
+        result = tester.run()
+        if not result.success and ("ModuleNotFoundError" in result.output or "ImportError" in result.output):
+            missing_module = _extract_missing_module(result.output)
+            if missing_module:
+                missing_package = dependency_manager.detect_missing({missing_module})
+                if missing_package:
+                    memory.append_devlog("Missing packages detected during pytest: " + ", ".join(missing_package))
+                    dependency_manager.install(missing_package)
+                    for package in missing_package:
+                        memory.append_devlog(f"Installed dependency: {package}")
+                    result = tester.run()
 
-    guard.resolve("memory").mkdir(parents=True, exist_ok=True)
-    memory = MemoryManager(guard)
+        missing_file_match = re.search(r"FileNotFoundError: .*?['\"]([^'\"]+)['\"]", result.output)
+        if missing_file_match:
+            missing_path = missing_file_match.group(1)
+            full_path = executor.guard.resolve(missing_path)
+            if not full_path.exists() and missing_path not in created_runtime_files:
+                memory.append_devlog(f"Missing runtime file detected: {missing_path}")
+                executor.generate_runtime_artifacts([missing_path])
+                memory.append_devlog(f"Generated runtime artifact: {missing_path}")
+                created_runtime_files.add(missing_path)
+                result = tester.run()
 
-    ctx = load_context(version.current_dir, version.previous_dir)
-    memory.append_devlog("Loaded context from current and previous version.")
+        error_analysis = fixer.analyze_failure(result.output)
+        memory.append_devlog("Error analysis:\n" + error_analysis)
 
+        executor.guard.resolve("tests/test_results.md").write_text(
+            f"# Validation attempt {attempt}\n\n```\n{result.output}\n```\n",
+            encoding="utf-8",
+        )
+
+        if result.success:
+            tests_passed = True
+            break
+
+        fix_note = fixer.apply(result.output + "\n\nAnalysis:\n" + error_analysis)
+        memory.append_devlog(f"Fix attempt {attempt}: {fix_note}")
+
+        if "No automatic fix applied" in fix_note:
+            no_progress += 1
+        else:
+            no_progress = 0
+
+        if no_progress >= 2:
+            memory.append_devlog("Stopping early: fixer made no progress for two consecutive attempts.")
+            break
+    return tests_passed
+
+
+def _run_build_pipeline(version, guard: SandboxGuard, memory: MemoryManager, ctx) -> int:
     requirements = extract_requirements(ctx.task_text, guard)
     memory.write_text("requirements.md", "\n".join(f"- {item}" for item in requirements))
     memory.append_devlog("Extracted requirements with LLM.")
@@ -54,30 +126,18 @@ def run(workdir: Path) -> int:
     memory.append_devlog("Saved plan.json generated by LLM.")
 
     structure = plan_file_structure(memory, guard)
-    memory.append_devlog(
-        f"File structure planned: src={len(structure['src'])}, tests={len(structure['tests'])}"
-    )
+    memory.append_devlog(f"File structure planned: src={len(structure['src'])}, tests={len(structure['tests'])}")
 
     executor = Executor(guard)
-
     generated: list[Path] = []
-
-    # structure phase
     generated.extend(executor.generate_structure_from_plan())
-
-    # implementation phase
     generated.extend(executor.implement_modules())
 
-    # runtime artifacts phase
     runtime_files = executor.detect_runtime_artifacts()
-
     if runtime_files:
-        memory.append_devlog(
-            "Runtime artifacts detected: " + ", ".join(runtime_files)
-        )
+        memory.append_devlog("Runtime artifacts detected: " + ", ".join(runtime_files))
         generated.extend(executor.generate_runtime_artifacts(runtime_files))
 
-    # dependency validation
     generated.extend(executor.validate_dependencies())
 
     dependency_manager = DependencyManager()
@@ -85,18 +145,13 @@ def run(workdir: Path) -> int:
     missing_packages = dependency_manager.detect_missing(imported_modules)
     memory.append_devlog("Dependency scan completed")
     if missing_packages:
-        memory.append_devlog(
-            "Missing packages detected: " + ", ".join(missing_packages)
-        )
+        memory.append_devlog("Missing packages detected: " + ", ".join(missing_packages))
         dependency_manager.install(missing_packages)
         for package in missing_packages:
             memory.append_devlog(f"Installed dependency: {package}")
 
-    # source validation before tests
     pretest_fixer = Fixer(version.current_dir, guard)
     source_issues = executor.validate_source_code()
-
-    # fix source validation issues before tests and re-validate
     pretest_attempt = 0
     while source_issues and pretest_attempt < MAX_PRETEST_FIX_ATTEMPTS:
         pretest_attempt += 1
@@ -113,119 +168,85 @@ def run(workdir: Path) -> int:
         source_issues = executor.validate_source_code()
 
     if source_issues:
-        memory.write_text(
-            "blocked.md",
-            "# Blocked\n\nSource validation failed before test generation.\n",
-        )
+        memory.write_text("blocked.md", "# Blocked\n\nSource validation failed before test generation.\n")
         memory.append_devlog("Stopped due to unresolved source validation issues.")
         return 1
 
-    # extract API for test generation
     executor.extract_api()
-
-    # generate tests ONCE
     generated.extend(executor.generate_tests_from_structure())
-
-    memory.append_devlog(
-        "Generated files: "
-        + ", ".join(str(path.relative_to(version.current_dir)) for path in generated)
-    )
+    memory.append_devlog("Generated files: " + ", ".join(str(path.relative_to(version.current_dir)) for path in generated))
 
     tester = Tester(version.current_dir)
     fixer = Fixer(version.current_dir, guard)
-
-    tests_passed = False
-    no_progress = 0
-    created_runtime_files = set()
-    for attempt in range(1, MAX_FIX_ATTEMPTS + 1):
-
-        memory.append_devlog(f"Validation attempt {attempt}")
-
-        result = tester.run()
-        if not result.success and ("ModuleNotFoundError" in result.output or "ImportError" in result.output):
-            missing_module = _extract_missing_module(result.output)
-            if missing_module:
-                missing_package = dependency_manager.detect_missing({missing_module})
-                if missing_package:
-                    memory.append_devlog(
-                        "Missing packages detected during pytest: " + ", ".join(missing_package)
-                    )
-                    dependency_manager.install(missing_package)
-                    for package in missing_package:
-                        memory.append_devlog(f"Installed dependency: {package}")
-                    result = tester.run()
-
-        missing_file_match = re.search(
-            r"FileNotFoundError: .*?['\"]([^'\"]+)['\"]",
-            result.output
-        )
-
-        if missing_file_match:
-            missing_path = missing_file_match.group(1)
-            full_path = guard.resolve(missing_path)
-
-            if not full_path.exists() and missing_path not in created_runtime_files:
-                memory.append_devlog(f"Missing runtime file detected: {missing_path}")
-                executor.generate_runtime_artifacts([missing_path])
-                memory.append_devlog(f"Generated runtime artifact: {missing_path}")
-                created_runtime_files.add(missing_path)
-                result = tester.run()
-
-        error_analysis = fixer.analyze_failure(result.output)
-        memory.append_devlog("Error analysis:\n" + error_analysis)
-
-        guard.resolve("tests/test_results.md").write_text(
-            f"# Validation attempt {attempt}\n\n```\n{result.output}\n```\n",
-            encoding="utf-8",
-        )
-
-        if result.success:
-            tests_passed = True
-            break
-
-        error_analysis = fixer.analyze_failure(result.output)
-        memory.append_devlog("Error analysis:\n" + error_analysis)
-        
-        fix_note = fixer.apply(result.output + "\n\nAnalysis:\n" + error_analysis)
-        memory.append_devlog(f"Fix attempt {attempt}: {fix_note}")
-
-        if "No automatic fix applied" in fix_note:
-            no_progress += 1
-        else:
-            no_progress = 0
-
-        if no_progress >= 2:
-            memory.append_devlog(
-                "Stopping early: fixer made no progress for two consecutive attempts."
-            )
-            break
+    tests_passed = _run_test_fix_loop(tester, fixer, executor, dependency_manager, memory)
 
     if not tests_passed:
-
-        memory.write_text(
-            "blocked.md",
-            "# Blocked\n\nValidation failed after maximum attempts.\n",
-        )
-
+        memory.write_text("blocked.md", "# Blocked\n\nValidation failed after maximum attempts.\n")
         memory.append_devlog("Stopped due to max validation attempts.")
         return 1
+
+    return 0
+
+
+def _run_evolve_pipeline(version, guard: SandboxGuard, memory: MemoryManager, ctx) -> int:
+    executor = Executor(guard)
+    dependency_manager = DependencyManager()
+
+    memory.append_devlog("Starting evolve pipeline.")
+    project_graph = analyze_project(guard)
+    memory.write_json("project_graph.json", project_graph)
+    memory.append_devlog("Project analysis completed")
+
+    review = generate_architecture_review(ctx.task_text, project_graph, version.current_dir)
+    memory.write_text("architecture_review.md", review)
+    memory.append_devlog("Architecture review generated")
+
+    plan = generate_refactor_plan(review)
+    memory.write_json("refactor_plan.json", plan)
+    memory.append_devlog("Refactor plan created")
+
+    applied = executor.apply_refactor(plan)
+    memory.append_devlog(f"Refactor actions applied ({len(applied)} file(s) updated)")
+
+    memory.append_devlog("Running tests after refactor")
+    tester = Tester(version.current_dir)
+    fixer = Fixer(version.current_dir, guard)
+    tests_passed = _run_test_fix_loop(tester, fixer, executor, dependency_manager, memory)
+
+    if not tests_passed:
+        memory.write_text("blocked.md", "# Blocked\n\nValidation failed after refactor attempts.\n")
+        memory.append_devlog("Stopped due to max validation attempts in evolve mode.")
+        return 1
+
+    return 0
+
+
+def run(workdir: Path) -> int:
+    version = detect_version(workdir)
+    guard = SandboxGuard(version.current_dir)
+    guard.resolve("memory").mkdir(parents=True, exist_ok=True)
+    memory = MemoryManager(guard)
+
+    ctx = load_context(version.current_dir, version.previous_dir)
+    memory.append_devlog("Loaded context from current and previous version.")
+
+    mode = detect_task_mode(ctx.task_text)
+    memory.append_devlog(f"Detected task mode: {mode}")
+
+    if mode == "evolve":
+        result = _run_evolve_pipeline(version, guard, memory, ctx)
+    else:
+        result = _run_build_pipeline(version, guard, memory, ctx)
+
+    if result != 0:
+        return result
 
     state = summarize_project(version.current_dir, guard)
     memory.write_text("project_state.md", state)
     memory.append_devlog("Updated project_state.md")
 
-    memory.write_text(
-        "context.md",
-        "Project finalized: all tests passed, no active bugs.",
-    )
-
-    memory.write_text(
-        "bugs.md",
-        "# Bugs\n\nNo active bugs.\n",
-    )
-
+    memory.write_text("context.md", "Project finalized: all tests passed, no active bugs.")
+    memory.write_text("bugs.md", "# Bugs\n\nNo active bugs.\n")
     memory.write_text("blocked.md", "")
-
     memory.append_devlog("Pipeline completed successfully.")
-
     return 0
