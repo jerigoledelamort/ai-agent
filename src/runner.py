@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 from .architect import build_architecture
 from .context_loader import load_context
+from .dependency_manager import DependencyManager
 from .executor import Executor
 from .fixer import Fixer
 from .memory_manager import MemoryManager
@@ -18,6 +20,14 @@ from .version_detector import detect_version
 
 MAX_FIX_ATTEMPTS = 20
 MAX_PRETEST_FIX_ATTEMPTS = 4
+_MISSING_MODULE_PATTERN = re.compile(r"No module named ['\"]([a-zA-Z_][\w\.]*)['\"]")
+
+
+def _extract_missing_module(error_output: str) -> str | None:
+    match = _MISSING_MODULE_PATTERN.search(error_output)
+    if not match:
+        return None
+    return match.group(1).split(".", 1)[0]
 
 
 def run(workdir: Path) -> int:
@@ -60,6 +70,18 @@ def run(workdir: Path) -> int:
 
     # dependency validation
     generated.extend(executor.validate_dependencies())
+
+    dependency_manager = DependencyManager()
+    imported_modules = dependency_manager.scan_imports(guard.resolve("src"))
+    missing_packages = dependency_manager.detect_missing(imported_modules)
+    memory.append_devlog("Dependency scan completed")
+    if missing_packages:
+        memory.append_devlog(
+            "Missing packages detected: " + ", ".join(missing_packages)
+        )
+        dependency_manager.install(missing_packages)
+        for package in missing_packages:
+            memory.append_devlog(f"Installed dependency: {package}")
 
     # source validation before tests
     pretest_fixer = Fixer(version.current_dir, guard)
@@ -110,6 +132,19 @@ def run(workdir: Path) -> int:
         memory.append_devlog(f"Validation attempt {attempt}")
 
         result = tester.run()
+        if not result.success and ("ModuleNotFoundError" in result.output or "ImportError" in result.output):
+            missing_module = _extract_missing_module(result.output)
+            if missing_module:
+                missing_package = dependency_manager.detect_missing({missing_module})
+                if missing_package:
+                    memory.append_devlog(
+                        "Missing packages detected during pytest: " + ", ".join(missing_package)
+                    )
+                    dependency_manager.install(missing_package)
+                    for package in missing_package:
+                        memory.append_devlog(f"Installed dependency: {package}")
+                    result = tester.run()
+
         error_analysis = fixer.analyze_failure(result.output)
         memory.append_devlog("Error analysis:\n" + error_analysis)
 
