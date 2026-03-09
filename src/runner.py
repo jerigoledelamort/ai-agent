@@ -68,6 +68,15 @@ def run(workdir: Path) -> int:
     # implementation phase
     generated.extend(executor.implement_modules())
 
+    # runtime artifacts phase
+    runtime_files = executor.detect_runtime_artifacts()
+
+    if runtime_files:
+        memory.append_devlog(
+            "Runtime artifacts detected: " + ", ".join(runtime_files)
+        )
+        generated.extend(executor.generate_runtime_artifacts(runtime_files))
+
     # dependency validation
     generated.extend(executor.validate_dependencies())
 
@@ -127,6 +136,7 @@ def run(workdir: Path) -> int:
 
     tests_passed = False
     no_progress = 0
+    created_runtime_files = set()
     for attempt in range(1, MAX_FIX_ATTEMPTS + 1):
 
         memory.append_devlog(f"Validation attempt {attempt}")
@@ -144,6 +154,22 @@ def run(workdir: Path) -> int:
                     for package in missing_package:
                         memory.append_devlog(f"Installed dependency: {package}")
                     result = tester.run()
+
+        missing_file_match = re.search(
+            r"FileNotFoundError: .*?['\"]([^'\"]+)['\"]",
+            result.output
+        )
+
+        if missing_file_match:
+            missing_path = missing_file_match.group(1)
+            full_path = guard.resolve(missing_path)
+
+            if not full_path.exists() and missing_path not in created_runtime_files:
+                memory.append_devlog(f"Missing runtime file detected: {missing_path}")
+                executor.generate_runtime_artifacts([missing_path])
+                memory.append_devlog(f"Generated runtime artifact: {missing_path}")
+                created_runtime_files.add(missing_path)
+                result = tester.run()
 
         error_analysis = fixer.analyze_failure(result.output)
         memory.append_devlog("Error analysis:\n" + error_analysis)

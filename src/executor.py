@@ -407,3 +407,33 @@ class Executor:
         )
 
         return generated
+
+    def detect_runtime_artifacts(self) -> list[str]:
+        import re
+        from pathlib import Path
+        runtime_files = set()
+        src_dir = self.guard.resolve("src")
+        pattern = re.compile(r"[\"']((config|data|assets)/[^\"']+)[\"']")
+        for file in src_dir.rglob("*.py"):
+            try:
+                text = file.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            for match in pattern.findall(text):
+                runtime_files.add(match[0])
+        return list(runtime_files)
+    
+    def generate_runtime_artifacts(self, paths: list[str]):
+        from pathlib import Path
+        created = []
+        for rel_path in paths:
+            path = self.guard.resolve(rel_path)
+            if path.exists():
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.suffix == ".json":
+                path.write_text("{}", encoding="utf-8")
+            else:
+                path.write_text("", encoding="utf-8")
+            created.append(path)
+        return created
