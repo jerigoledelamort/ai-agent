@@ -16,7 +16,7 @@ from .tester import Tester
 from .version_detector import detect_version
 
 
-MAX_FIX_ATTEMPTS = 12
+MAX_FIX_ATTEMPTS = 20
 MAX_PRETEST_FIX_ATTEMPTS = 4
 
 
